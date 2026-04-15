@@ -1,0 +1,116 @@
+import asyncio
+import os
+import uuid
+import time
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from yt_dlp import YoutubeDL
+
+# Настройка логов, чтобы видеть ошибки в консоли
+logging.basicConfig(level=logging.INFO)
+
+# --- ДАННЫЕ (ЗАМЕНИ НА СВОИ) ---
+TOKEN = "8555621346:AAH1k5-QcjOJ3L4xLKEfw0qy5h-Kwb96rsM"
+CHANNEL_ID = "@OceanBladeDev" 
+CHANNEL_URL = "https://t.me/OceanBladeDev"
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+async def is_subscribed(user_id: int):
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except Exception:
+        return False
+
+class ProgressRecorder:
+    def __init__(self, message: types.Message):
+        self.message = message
+        self.last_update_time = 0
+
+    def hook(self, d):
+        if d['status'] == 'downloading':
+            current_time = time.time()
+            if current_time - self.last_update_time < 2.0:
+                return
+            try:
+                p = d.get('_percent_str', '0%').replace(' ', '')
+                percent_float = float(p.replace('%', ''))
+                done = int(percent_float / 10)
+                bar = "▓" * done + "░" * (10 - done)
+                asyncio.run_coroutine_threadsafe(
+                    self.message.edit_text(f"⏳ Загрузка...\n\n{bar} {p}"),
+                    asyncio.get_event_loop()
+                )
+                self.last_update_time = current_time
+            except:
+                pass
+
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="💎 Подписаться", url=CHANNEL_URL))
+    await message.answer(
+        f"👋 Привет! Пришли ссылку на видео, и я его скачаю.\n\n"
+        "Но сначала подпишись на канал!",
+        reply_markup=builder.as_markup()
+    )
+
+@dp.message(F.text.contains("http"))
+async def handle_link(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not await is_subscribed(user_id):
+        builder = InlineKeyboardBuilder()
+        builder.row(types.InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub"))
+        await message.answer("⚠️ Подпишись на канал, чтобы качать видео!", reply_markup=builder.as_markup())
+        return
+
+    status_msg = await message.answer("🔍 Анализ ссылки...")
+    file_id = uuid.uuid4().hex
+    file_path = f"downloads/{file_id}.mp4"
+    progress = ProgressRecorder(status_msg)
+    
+    ydl_opts = {
+        'format': 'best[ext=mp4][filesize<50M]/best[filesize<50M]/best',
+        'outtmpl': file_path,
+        'progress_hooks': [progress.hook],
+        'quiet': True,
+        'extractor_args': {'youtube': {'player_client': ['android', 'web', 'ios']}},
+    }
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: YoutubeDL(ydl_opts).download([message.text]))
+        
+        if os.path.exists(file_path):
+            await status_msg.edit_text("📤 Отправляю файл...")
+            video = types.FSInputFile(file_path)
+            await message.answer_video(video=video, caption="✅ Готово!")
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ Ошибка: файл не найден.")
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        await status_msg.edit_text("❌ Ошибка скачивания. Возможно, файл слишком большой.")
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+@dp.callback_query(F.data == "check_sub")
+async def callback_check(callback: types.CallbackQuery):
+    if await is_subscribed(callback.from_user.id):
+        await callback.message.edit_text("✅ Подписка есть! Кидай ссылку.")
+    else:
+        await callback.answer("❌ Ты не подписан!", show_alert=True)
+
+async def main():
+    if not os.path.exists('downloads'):
+        os.makedirs('downloads')
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
